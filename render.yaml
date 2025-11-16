@@ -3,7 +3,7 @@ services:
     name: movebank-backend
     env: python
     plan: free
-    repo: <https://github.com/prashantwct/MBR> # replace with your Git repo URL
+    repo: https://github.com/prashantwct/MBR # replace with your Git repo URL
     branch: main
     buildCommand: "pip install -r backend/requirements.txt"
     startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port 10000"
@@ -15,7 +15,7 @@ services:
         fromDatabase: null
   - type: static
     name: movebank-frontend
-    repo: <https://github.com/prashantwct/MBR> # replace with your Git repo URL
+    repo: https://github.com/prashantwct/MBR # replace with your Git repo URL
     branch: main
     buildCommand: "cd frontend && npm install && npm run build"
     publishPath: "frontend/dist"
