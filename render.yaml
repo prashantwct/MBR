@@ -1,20 +1,17 @@
 services:
-  # --------------------------
-  # BACKEND (FastAPI)
-  # --------------------------
   - type: web
     name: movebank-backend
     env: python
-    rootDir: backend
     plan: free
+    rootDir: backend
     buildCommand: "pip install -r requirements.txt"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port 10000"
-    autoDeploy: true
     envVars:
       - key: MOVEBANK_USER
         sync: false
       - key: MOVEBANK_PASS
         sync: false
+
 
   # --------------------------
   # FRONTEND (React + Vite)
