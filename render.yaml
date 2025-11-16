@@ -1,24 +1,27 @@
 services:
+  # Backend service (FastAPI)
   - type: web
     name: movebank-backend
     env: python
     plan: free
-    repo: https://github.com/prashantwct/MBR # replace with your Git repo URL
+    repo: https://github.com/prashantwct/MBR
     branch: main
     buildCommand: "pip install -r backend/requirements.txt"
     startCommand: "uvicorn backend.main:app --host 0.0.0.0 --port 10000"
     autoDeploy: true
     envVars:
       - key: MOVEBANK_USER
-        fromDatabase: null
+        sync: false
       - key: MOVEBANK_PASS
-        fromDatabase: null
+        sync: false
+
+  # Frontend (Static site)
   - type: static
     name: movebank-frontend
-    repo: https://github.com/prashantwct/MBR # replace with your Git repo URL
+    repo: https://github.com/prashantwct/MBR
     branch: main
     buildCommand: "cd frontend && npm install && npm run build"
     publishPath: "frontend/dist"
-    env:
+    envVars:
       - key: VITE_API_BASE
-        value: "https://<your-backend-service>.onrender.com"
+        value: "https://movebank-backend.onrender.com"
