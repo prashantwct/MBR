@@ -11,23 +11,34 @@ export default function MovebankExplorer(){
   const fileRef = useRef();
 
   async function fetchStudy(studyId){
-    try{
-      const res = await fetch("/api/download-study", {
-        method:"POST",
-        headers: { "Content-Type":"application/json" },
-        body: JSON.stringify({ study_id: String(studyId), username: mbUser || undefined, password: mbPass || undefined })
-      });
-      if(!res.ok){
-        const err = await res.json().catch(()=>null);
-        throw new Error(err?.detail || res.statusText);
-      }
-      const text = await res.text();
-      const parsed = Papa.parse(text, { header:true, skipEmptyLines:true });
-      setRows(parsed.data || []);
-    }catch(e){
-      alert("Download error: " + e.message);
+  try {
+    const API_BASE = import.meta.env.VITE_API_BASE || "";
+    const res = await fetch(`${API_BASE}/api/download-study`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        study_id: String(studyId),
+        username: mbUser || undefined,
+        password: mbPass || undefined
+      })
+    });
+
+    if (!res.ok) {
+      const err = await res.json().catch(()=>null);
+      throw new Error(err?.detail || res.statusText);
     }
+
+    const text = await res.text();
+    const parsed = Papa.parse(text, { header: true, skipEmptyLines: true });
+    setRows(parsed.data || []);
+
+  } catch (e) {
+    alert("Download error: " + e.message);
   }
+}
+
 
   function handleFile(e){
     const f = e.target.files?.[0];
