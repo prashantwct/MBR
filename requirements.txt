@@ -1,0 +1,9 @@
+streamlit
+pandas
+requests
+pydeck
+altair
+scipy
+scikit-learn
+joblib
+shapely
