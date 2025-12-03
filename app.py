@@ -8,21 +8,14 @@ import altair as alt
 import time
 from io import StringIO
 from datetime import datetime, timedelta
+from scipy.spatial import ConvexHull
+from scipy.stats import gaussian_kde
+from shapely.geometry import Polygon
 from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from sklearn.neighbors import NearestNeighbors
 from sklearn.ensemble import RandomForestClassifier
-from scipy.interpolate import splprep, splev
 import joblib
-
-# Import RPY2 (Now guaranteed to work via Conda)
-try:
-    import rpy2.robjects as ro
-    from rpy2.robjects import pandas2ri
-    from rpy2.robjects.conversion import localconverter
-    R_AVAILABLE = True
-except ImportError:
-    R_AVAILABLE = False
 
 # Page Config
 st.set_page_config(page_title="Movebank Explorer", layout="wide")
@@ -49,29 +42,6 @@ def get_random_color(seed_str):
     b = (hash_val & 0x0000FF)
     return [r, g, b]
 
-def r_list_to_dict(r_list):
-    try:
-        keys = list(r_list.names)
-        return {k: r_list.rx2(k) for k in keys}
-    except:
-        return {}
-
-def smooth_path_bspline(points, num_points_factor=5):
-    if len(points) < 4: return points
-    try:
-        unique_points = [points[0]]
-        for p in points[1:]:
-            if p != unique_points[-1]: unique_points.append(p)
-        if len(unique_points) < 4: return points
-        x = [p[0] for p in unique_points]
-        y = [p[1] for p in unique_points]
-        tck, u = splprep([x, y], s=0, k=3)
-        u_new = np.linspace(0, 1, len(unique_points) * num_points_factor)
-        x_new, y_new = splev(u_new, tck)
-        return [[xn, yn] for xn, yn in zip(x_new, y_new)]
-    except:
-        return points
-
 def get_tile_layer(style):
     if style == "Satellite":
         url = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
@@ -89,6 +59,7 @@ def get_tile_layer(style):
         opacity=1.0
     )
 
+# --- Analysis Algorithms ---
 def run_st_dbscan(df, spatial_eps_m, temporal_eps_min, min_samples):
     mean_lat = df['lat'].mean()
     mean_lon = df['lon'].mean()
@@ -113,6 +84,59 @@ def run_st_dbscan(df, spatial_eps_m, temporal_eps_min, min_samples):
     valid_clusters = unique[counts >= min_samples]
     final_labels = np.array([l if l in valid_clusters else -1 for l in labels])
     return final_labels
+
+def calculate_mcp(df):
+    """Calculates Minimum Convex Polygon Area (km2) and Vertices"""
+    points = df[['lon', 'lat']].values
+    if len(points) < 3: return 0, []
+    
+    hull = ConvexHull(points)
+    # Get vertices in order
+    vertices_idx = hull.vertices
+    vertices = points[vertices_idx]
+    # Close the polygon
+    vertices = np.vstack([vertices, vertices[0]])
+    
+    # Calculate Area (Projected approx)
+    # Simple projection: Mean Lat scaling
+    mean_lat = np.mean(vertices[:, 1])
+    x = vertices[:, 0] * 111.32 * np.cos(np.radians(mean_lat))
+    y = vertices[:, 1] * 111.32
+    
+    # Shoelace formula for area
+    area_km2 = 0.5 * np.abs(np.dot(x, np.roll(y, 1)) - np.dot(y, np.roll(x, 1)))
+    
+    return area_km2, vertices.tolist()
+
+def calculate_kde_95(df, grid_size=50):
+    """Estimates 95% KDE Home Range Area (km2)"""
+    # Project to local meters
+    mean_lat = df['lat'].mean()
+    mean_lon = df['lon'].mean()
+    x = (df['lon'] - mean_lon) * 111320 * np.cos(np.radians(mean_lat))
+    y = (df['lat'] - mean_lat) * 111320
+    
+    values = np.vstack([x, y])
+    kernel = gaussian_kde(values)
+    
+    # Create grid
+    xmin, xmax = x.min(), x.max()
+    ymin, ymax = y.min(), y.max()
+    X, Y = np.mgrid[xmin:xmax:complex(0, grid_size), ymin:ymax:complex(0, grid_size)]
+    positions = np.vstack([X.ravel(), Y.ravel()])
+    Z = np.reshape(kernel(positions).T, X.shape)
+    
+    # Find 95% threshold
+    # Sort density values, compute cumulative sum, find cutoff
+    sorted_z = np.sort(Z.ravel())[::-1]
+    cumulative = np.cumsum(sorted_z) / np.sum(sorted_z)
+    threshold_idx = np.searchsorted(cumulative, 0.95)
+    threshold = sorted_z[threshold_idx]
+    
+    # Calculate Area: Count pixels > threshold * pixel_area
+    pixel_area = ((xmax - xmin) / grid_size) * ((ymax - ymin) / grid_size)
+    area_m2 = np.sum(Z > threshold) * pixel_area
+    return area_m2 / 1e6 # km2
 
 # --- ML Functions ---
 MODEL_FILE = "cluster_model.pkl"
@@ -252,7 +276,7 @@ if st.session_state.data is not None:
     if filtered_df.empty:
         st.warning("No data found.")
     else:
-        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Map 🗺️", "Analysis 📈", "Deployments 📡", "R-Home Range 🏠", "Kill Clusters 🍖", "Exploration 🐾"])
+        tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(["Map 🗺️", "Analysis 📈", "Deployments 📡", "Home Range 🏠", "Kill Clusters 🍖", "Exploration 🐾"])
         
         with tab1:
             if 'lat' in filtered_df.columns:
@@ -283,68 +307,61 @@ if st.session_state.data is not None:
             st.dataframe(stats, use_container_width=True)
 
         with tab4:
-            st.subheader("R-Powered Home Range")
-            if not R_AVAILABLE: st.error("R/rpy2 not installed.")
-            else:
-                hr_id = st.selectbox("Select Animal", filtered_df['individual_id'].unique())
-                if hr_id and st.button("Run AKDE"):
-                    try:
-                        animal_data = filtered_df[filtered_df['individual_id'] == hr_id].copy()
-                        animal_data['timestamp'] = animal_data['timestamp'].dt.strftime('%Y-%m-%d %H:%M:%S')
-                        r_df_input = pd.DataFrame({
-                            'timestamp': animal_data['timestamp'],
-                            'long': animal_data['lon'],
-                            'lat': animal_data['lat'],
-                            'individual.local.identifier': animal_data['individual_id']
-                        })
-                        with localconverter(ro.default_converter + pandas2ri.converter):
-                            r_df_r = ro.conversion.py2rpy(r_df_input)
-                            r_code = """
-                            library(ctmm)
-                            library(sf)
-                            function(df) {
-                                out_status <- "ok"
-                                out_msg <- ""
-                                out_stats <- NULL
-                                out_coords <- NULL
-                                tryCatch({
-                                    tel <- as.telemetry(df, time.format="%Y-%m-%d %H:%M:%S")
-                                    if (class(tel)[1] == "list") { tel <- tel[[1]] }
-                                    GUESS <- ctmm.guess(tel, interactive=FALSE)
-                                    if (class(GUESS)[1] == "list") { GUESS <- GUESS[[1]] }
-                                    FIT <- ctmm.fit(tel, GUESS)
-                                    if (class(FIT)[1] == "list") { FIT <- FIT[[1]] }
-                                    UD <- akde(tel, FIT)
-                                    if (class(UD)[1] == "list") { UD <- UD[[1]] }
-                                    summ <- summary(UD, units=FALSE)
-                                    out_stats <- as.numeric(summ$CI)
-                                    sp_obj <- SpatialPolygonsDataFrame.UD(UD, level.UD=0.95)
-                                    sf_obj <- st_as_sf(sp_obj)
-                                    sf_obj <- st_transform(sf_obj, crs=4326)
-                                    out_coords <- st_coordinates(sf_obj)
-                                }, error = function(e) {
-                                    out_status <<- "error"
-                                    out_msg <<- as.character(e$message)
-                                })
-                                return(list(status=out_status, msg=out_msg, stats=out_stats, coords=out_coords))
-                            }
-                            """
-                            r_func = ro.r(r_code)
-                            r_result = r_func(r_df_r)
-                            res_dict = r_list_to_dict(r_result)
-                            if str(res_dict['status'][0]) == "error":
-                                st.error(f"R Logic Error: {res_dict['msg'][0]}")
-                            else:
-                                stats_vec = np.array(res_dict['stats'])
-                                est_km2 = float(stats_vec[1]) / 1_000_000
-                                coords_np = np.array(res_dict['coords'])
-                                df_coords = pd.DataFrame(coords_np, columns=['lon', 'lat', 'L1', 'L2'][:coords_np.shape[1]])
-                                polygons = [group[['lon', 'lat']].values.tolist() for _, group in df_coords.groupby('L1')] if 'L1' in df_coords.columns else [df_coords[['lon', 'lat']].values.tolist()]
-                                st.metric("AKDE Area (95%)", f"{est_km2:.2f} km²")
-                                layer_poly = pdk.Layer("PolygonLayer", data=[{"polygon": p} for p in polygons], get_polygon="polygon", filled=True, get_fill_color=[0,0,255,50], get_line_color=[0,0,255,200], get_line_width=2, stroked=True)
-                                st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.data_utils.compute_view(df_coords[['lon', 'lat']]), layers=[get_tile_layer(map_style), layer_poly]))
-                    except Exception as e:
-                        st.error(f"R Execution Failed: {e}")
+            st.subheader("Home Range (Python-Native)")
+            hr_id = st.selectbox("Select Animal", filtered_df['individual_id'].unique())
+            if hr_id:
+                hr_data = filtered_df[filtered_df['individual_id'] == hr_id]
+                if len(hr_data) > 5:
+                    # Calculate MCP
+                    mcp_area, mcp_coords = calculate_mcp(hr_data)
+                    # Calculate KDE (Estimate)
+                    kde_area = calculate_kde_95(hr_data)
+                    
+                    c1, c2 = st.columns(2)
+                    c1.metric("MCP (100%)", f"{mcp_area:.2f} km²")
+                    c2.metric("KDE (95%)", f"{kde_area:.2f} km²")
+                    
+                    # Layers
+                    layers = [get_tile_layer(map_style)]
+                    
+                    # KDE Contour Layer
+                    layers.append(pdk.Layer(
+                        "ContourLayer",
+                        data=hr_data,
+                        get_position='[lon, lat]',
+                        contours=[
+                            {"threshold": 1, "color": [0, 255, 0, 100], "strokeWidth": 2, "zIndex": 1}, # Broad
+                            {"threshold": 5, "color": [255, 0, 0, 100], "strokeWidth": 2, "zIndex": 2}, # Core
+                        ],
+                        cellSize=200,
+                        aggregation="MEAN"
+                    ))
+                    
+                    # MCP Polygon Layer
+                    if mcp_coords:
+                        layers.append(pdk.Layer(
+                            "PolygonLayer",
+                            data=[{"polygon": mcp_coords}],
+                            get_polygon="polygon",
+                            filled=True,
+                            get_fill_color=[0, 0, 255, 40],
+                            get_line_color=[0, 0, 255, 200],
+                            get_line_width=2,
+                            stroked=True
+                        ))
+
+                    # Points
+                    layers.append(pdk.Layer("ScatterplotLayer", data=hr_data, get_position='[lon, lat]', get_radius=30, get_color=[0,0,0,150]))
+                    
+                    st.pydeck_chart(pdk.Deck(
+                        map_style=None, 
+                        initial_view_state=pdk.data_utils.compute_view(hr_data[['lon', 'lat']]),
+                        layers=layers,
+                        tooltip={"text": "Home Range"}
+                    ))
+                    st.caption("🔵 Blue = MCP | 🟢/🔴 Contours = KDE Density")
+                else:
+                    st.warning("Not enough points for Home Range.")
 
         with tab5:
             st.subheader("Kill Cluster Identification 🍖")
@@ -366,11 +383,9 @@ if st.session_state.data is not None:
                         clf = load_model()
                         if clf: stats['Label'] = clf.predict(stats[['Duration (hrs)', 'Points']])
                         else: stats['Label'] = "Unclassified"
-                        
                         layers = [get_tile_layer(map_style)]
                         layers.append(pdk.Layer("ScatterplotLayer", data=stats, get_position='[Lon, Lat]', get_radius=spat_thresh*2, get_fill_color=[255,0,0,150], pickable=True))
                         st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.data_utils.compute_view(stats[['Lon', 'Lat']]), layers=layers, tooltip={"text": "{Label}\n{Duration (hrs)} hrs"}))
-                        
                         edited_df = st.data_editor(stats[['cluster', 'Duration (hrs)', 'Points', 'Label']], column_config={"Label": st.column_config.SelectboxColumn(options=["Unclassified", "Kill", "Resting", "Natal", "Other"], required=True)}, use_container_width=True)
                         if st.button("Save & Retrain Model"):
                             valid = edited_df[edited_df['Label'] != 'Unclassified']
@@ -405,12 +420,12 @@ if st.session_state.data is not None:
                         if len(ind_steps) < 1: continue
                         
                         raw_points = ind_steps[['lon', 'lat']].values.tolist()
-                        smooth_points = smooth_path_bspline(raw_points, num_points_factor=5)
                         color = get_random_color(ind)
                         
-                        # Smooth Path
-                        layers.append(pdk.Layer("PathLayer", data=[{"path": smooth_points, "name": ind}], get_color=color, width_scale=20, width_min_pixels=3, get_path="path", pickable=True))
-                        # Release Marker (Red)
+                        # 2. Path (No smoothing)
+                        layers.append(pdk.Layer("PathLayer", data=[{"path": raw_points, "name": ind}], get_color=color, width_scale=20, width_min_pixels=3, get_path="path", pickable=True))
+                        
+                        # 3. Release Marker (Red)
                         layers.append(pdk.Layer("ScatterplotLayer", data=ind_steps.iloc[[0]], get_position='[lon, lat]', get_fill_color=[255, 0, 0, 255], get_line_color=[255,255,255,255], get_line_width=300, get_radius=300, radius_min_pixels=6, stroked=True))
                         
                         all_coords.extend(raw_points)
