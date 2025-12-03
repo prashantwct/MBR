@@ -1,0 +1,7 @@
+r-base
+r-base-dev
+libgdal-dev
+libudunits2-dev
+libgeos-dev
+libproj-dev
+libgsl-dev
