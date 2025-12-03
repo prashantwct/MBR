@@ -16,7 +16,7 @@ dependencies:
   - geopandas
   - movingpandas
   - shapely
-  # R Packages (Pre-compiled binaries)
+  # R Packages (Pre-compiled binaries to avoid compilation errors)
   - r-base
   - r-sf
   - r-ctmm
