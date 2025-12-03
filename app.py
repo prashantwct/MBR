@@ -6,8 +6,6 @@ import numpy as np
 import pydeck as pdk
 import altair as alt
 import time
-import subprocess
-import sys
 from io import StringIO
 from datetime import datetime, timedelta
 from scipy.sparse import csr_matrix
@@ -17,40 +15,7 @@ from sklearn.ensemble import RandomForestClassifier
 from scipy.interpolate import splprep, splev
 import joblib
 
-# --- R PACKAGE INSTALLATION (Cloud Compatibility) ---
-# This ensures 'ctmm' and 'sf' are installed in the cloud environment
-@st.cache_resource
-def install_r_packages():
-    # Check if R is available
-    try:
-        import rpy2
-    except ImportError:
-        return False
-
-    # Check if packages are installed
-    check_script = """
-    if (!require("sf")) quit(status=1)
-    if (!require("ctmm")) quit(status=1)
-    """
-    check_res = subprocess.run(["R", "-e", check_script], capture_output=True)
-    
-    if check_res.returncode != 0:
-        with st.spinner("Installing R packages (sf, ctmm)... this takes 5-10 mins on first load."):
-            repo = "https://cloud.r-project.org"
-            install_script = f"""
-            install.packages("sf", repos="{repo}")
-            install.packages("ctmm", repos="{repo}")
-            """
-            process = subprocess.run(["R", "-e", install_script], capture_output=True, text=True)
-            if process.returncode != 0:
-                st.error(f"R Installation Failed: {process.stderr}")
-                return False
-    return True
-
-# Trigger installation check
-r_ready = install_r_packages()
-
-# Try importing RPY2
+# Import RPY2 (Now guaranteed to work via Conda)
 try:
     import rpy2.robjects as ro
     from rpy2.robjects import pandas2ri
@@ -90,6 +55,22 @@ def r_list_to_dict(r_list):
         return {k: r_list.rx2(k) for k in keys}
     except:
         return {}
+
+def smooth_path_bspline(points, num_points_factor=5):
+    if len(points) < 4: return points
+    try:
+        unique_points = [points[0]]
+        for p in points[1:]:
+            if p != unique_points[-1]: unique_points.append(p)
+        if len(unique_points) < 4: return points
+        x = [p[0] for p in unique_points]
+        y = [p[1] for p in unique_points]
+        tck, u = splprep([x, y], s=0, k=3)
+        u_new = np.linspace(0, 1, len(unique_points) * num_points_factor)
+        x_new, y_new = splev(u_new, tck)
+        return [[xn, yn] for xn, yn in zip(x_new, y_new)]
+    except:
+        return points
 
 def get_tile_layer(style):
     if style == "Satellite":
@@ -385,9 +366,11 @@ if st.session_state.data is not None:
                         clf = load_model()
                         if clf: stats['Label'] = clf.predict(stats[['Duration (hrs)', 'Points']])
                         else: stats['Label'] = "Unclassified"
+                        
                         layers = [get_tile_layer(map_style)]
                         layers.append(pdk.Layer("ScatterplotLayer", data=stats, get_position='[Lon, Lat]', get_radius=spat_thresh*2, get_fill_color=[255,0,0,150], pickable=True))
                         st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.data_utils.compute_view(stats[['Lon', 'Lat']]), layers=layers, tooltip={"text": "{Label}\n{Duration (hrs)} hrs"}))
+                        
                         edited_df = st.data_editor(stats[['cluster', 'Duration (hrs)', 'Points', 'Label']], column_config={"Label": st.column_config.SelectboxColumn(options=["Unclassified", "Kill", "Resting", "Natal", "Other"], required=True)}, use_container_width=True)
                         if st.button("Save & Retrain Model"):
                             valid = edited_df[edited_df['Label'] != 'Unclassified']
@@ -422,12 +405,12 @@ if st.session_state.data is not None:
                         if len(ind_steps) < 1: continue
                         
                         raw_points = ind_steps[['lon', 'lat']].values.tolist()
+                        smooth_points = smooth_path_bspline(raw_points, num_points_factor=5)
                         color = get_random_color(ind)
                         
-                        # 2. Path (No smoothing)
-                        layers.append(pdk.Layer("PathLayer", data=[{"path": raw_points, "name": ind}], get_color=color, width_scale=20, width_min_pixels=3, get_path="path", pickable=True))
-                        
-                        # 3. Release Marker (Red)
+                        # Smooth Path
+                        layers.append(pdk.Layer("PathLayer", data=[{"path": smooth_points, "name": ind}], get_color=color, width_scale=20, width_min_pixels=3, get_path="path", pickable=True))
+                        # Release Marker (Red)
                         layers.append(pdk.Layer("ScatterplotLayer", data=ind_steps.iloc[[0]], get_position='[lon, lat]', get_fill_color=[255, 0, 0, 255], get_line_color=[255,255,255,255], get_line_width=300, get_radius=300, radius_min_pixels=6, stroked=True))
                         
                         all_coords.extend(raw_points)

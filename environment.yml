@@ -1,0 +1,22 @@
+name: mbr_env
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - streamlit
+  - pandas
+  - requests
+  - pydeck
+  - altair
+  - scipy
+  - scikit-learn
+  - joblib
+  - rpy2
+  - geopandas
+  - movingpandas
+  - shapely
+  # R Packages (Pre-compiled binaries)
+  - r-base
+  - r-sf
+  - r-ctmm
