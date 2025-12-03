@@ -1,7 +1,7 @@
-r-base
-r-base-dev
+r-base-core
 libgdal-dev
 libudunits2-dev
 libgeos-dev
 libproj-dev
 libgsl-dev
+unixodbc-dev
