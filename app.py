@@ -14,12 +14,16 @@ from scipy.sparse import csr_matrix
 from scipy.sparse.csgraph import connected_components
 from sklearn.neighbors import NearestNeighbors
 from sklearn.ensemble import RandomForestClassifier
+from scipy.interpolate import splprep, splev
 import joblib
+
+# --- CONFIGURATION ---
+MAPBOX_KEY = "pk.eyJ1Ijoid2N0dGVsZW1ldHJ5IiwiYSI6ImNtaXN0NnY5YjBkMnIzZ3F4aGl5cjdhem4ifQ.Yc3j-JDZ24vxSBq1n7jAsw"
 
 # Page Config
 st.set_page_config(
     page_title="Animal Movement Explorer",
-    page_icon="🐾",
+    page_icon=":paw_prints:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -45,15 +49,6 @@ def get_random_color(seed_str):
     b = (hash_val & 0x0000FF)
     return [r, g, b]
 
-def get_tile_layer(style):
-    if style == "Satellite":
-        url = "https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}"
-    elif style == "Light":
-        url = "https://basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
-    else: 
-        url = "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}.png"
-    return pdk.Layer("TileLayer", data=url, id=f"basemap-layer-{style}", min_zoom=0, max_zoom=19, opacity=1.0)
-
 def format_duration(td):
     total_seconds = int(td.total_seconds())
     days = total_seconds // 86400
@@ -76,7 +71,12 @@ def generate_whatsapp_link(row):
 def generate_kml(df, cluster_col='cluster'):
     kml = '<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2">\n<Document>\n'
     for _, row in df.iterrows():
-        kml += f"""<Placemark><name>Cluster {row[cluster_col]}</name><description>Start: {row['Start']}\nEnd: {row['End']}\nDuration: {row['Duration (hrs)']} hrs</description><Point><coordinates>{row['Lon']},{row['Lat']},0</coordinates></Point></Placemark>\n"""
+        lon = row.get('Lon', row.get('lon', 0))
+        lat = row.get('Lat', row.get('lat', 0))
+        start = row.get('Start', 'N/A')
+        end = row.get('End', 'N/A')
+        duration = row.get('Duration (hrs)', 'N/A')
+        kml += f"""<Placemark><name>Cluster {row[cluster_col]}</name><description>Start: {start}\nEnd: {end}\nDuration: {duration} hrs</description><Point><coordinates>{lon},{lat},0</coordinates></Point></Placemark>\n"""
     kml += '</Document>\n</kml>'
     return kml
 
@@ -190,7 +190,15 @@ with st.sidebar:
             st.session_state.fetch_trigger = True
 
     with st.expander("2. Map Settings", expanded=False):
-        map_style = st.selectbox("Basemap", ["Satellite", "Light", "Dark"], index=0)
+        # Map style options linked to Mapbox URLs
+        style_options = {
+            "Satellite": "mapbox://styles/mapbox/satellite-v9",
+            "Light": "mapbox://styles/mapbox/light-v10",
+            "Dark": "mapbox://styles/mapbox/dark-v10",
+            "Outdoors": "mapbox://styles/mapbox/outdoors-v11"
+        }
+        map_style_name = st.selectbox("Basemap", list(style_options.keys()), index=0)
+        map_style_url = style_options[map_style_name]
 
 # --- DATA LOAD ---
 if 'data' not in st.session_state:
@@ -293,7 +301,7 @@ else:
         st.warning("No data matches your filters.")
     else:
         tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-            "📊 Dashboard", "🗺️ Map", "📈 Analysis", "📡 Deployment", "📍 Home Range", "�� Kill Clusters", "🐾 Exploration", "ℹ️ Help"
+            "📊 Dashboard", "🗺️ Map", "📈 Analysis", "📡 Deployment", "📍 Home Range", "🍖 Kill Clusters", "🐾 Exploration", "ℹ️ Help"
         ])
         
         # 1. DASHBOARD
@@ -337,7 +345,7 @@ else:
 
         # 2. MAP
         with tab2:
-            layers = [get_tile_layer(map_style)]
+            layers = []
             for ind in filtered_df['individual_id'].unique():
                 d = filtered_df[filtered_df['individual_id'] == ind]
                 if len(d) < 2: continue
@@ -345,29 +353,42 @@ else:
                 color = get_random_color(ind)
                 layers.append(pdk.Layer("PathLayer", data=[{"path": path, "name": ind}], pickable=True, get_color=color, width_scale=20, width_min_pixels=2, get_path="path"))
                 
-                start_pt = d.sort_values('timestamp').iloc[[0]].copy()
-                end_pt = d.sort_values('timestamp').iloc[[-1]].copy()
+                start_pt = d.sort_values('timestamp').iloc[[0]]
+                end_pt = d.sort_values('timestamp').iloc[[-1]]
                 
-                start_pt['marker'] = '■'
-                end_pt['marker'] = '■'
-                
-                # Red Square Start (TextLayer)
+                # Start: Black Circle, Yellow Outline
                 layers.append(pdk.Layer(
-                    "TextLayer", data=start_pt, get_position='[lon, lat]',
-                    get_text='marker', get_color=[255, 0, 0, 255], get_size=20,
-                    get_alignment_baseline="'center'", get_text_anchor="'middle'"
+                    "ScatterplotLayer", 
+                    data=start_pt, 
+                    get_position='[lon, lat]', 
+                    get_fill_color=[0, 0, 0, 255], 
+                    get_line_color=[255, 255, 0, 255], 
+                    get_radius=5, radius_units='pixels', 
+                    stroked=True, get_line_width=20
                 ))
                 
-                # Green Square End (TextLayer)
+                # End: Green Circle
                 layers.append(pdk.Layer(
-                    "TextLayer", data=end_pt, get_position='[lon, lat]',
-                    get_text='marker', get_color=[0, 255, 0, 255], get_size=20,
-                    get_alignment_baseline="'center'", get_text_anchor="'middle'"
+                    "ScatterplotLayer", 
+                    data=end_pt, 
+                    get_position='[lon, lat]', 
+                    get_fill_color=[0, 255, 0, 255], 
+                    get_radius=5, radius_units='pixels', 
+                    stroked=True, get_line_color=[255,255,255], get_line_width=20
                 ))
 
             view_state = pdk.data_utils.compute_view(filtered_df[['lon', 'lat']], view_type=pdk.ViewState)
-            st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=view_state, layers=layers))
-            st.caption("🔴 Start | 🟢 End")
+            # Use Mapbox Style + Key to force reload
+            st.pydeck_chart(
+                pdk.Deck(
+                    map_style=map_style_url,
+                    api_keys={'mapbox': MAPBOX_KEY},
+                    initial_view_state=view_state,
+                    layers=layers
+                ), 
+                key=f"main_map_{map_style_name}"
+            )
+            st.caption("⚫ Start | 🟢 End")
 
         # 3. ANALYSIS
         with tab3:
@@ -421,7 +442,7 @@ else:
                     show_kde = st.checkbox("Show KDE Heatmap", value=True)
                     show_occ = st.checkbox("Add Occurrence Distribution (Broad)", value=False)
                     
-                    layers = [get_tile_layer(map_style)]
+                    layers = []
                     if show_occ:
                         layers.append(pdk.Layer("HeatmapLayer", data=hr_data, get_position='[lon, lat]', opacity=0.4, threshold=0.01, radius_pixels=60, intensity=0.5))
                     if show_kde:
@@ -429,7 +450,12 @@ else:
                     if show_mcp and mcp_coords:
                         layers.append(pdk.Layer("PolygonLayer", data=[{"polygon": mcp_coords}], get_polygon="polygon", filled=True, get_fill_color=[0, 0, 255, 30], get_line_color=[0, 0, 255, 200], get_line_width=2, stroked=True))
                     layers.append(pdk.Layer("ScatterplotLayer", data=hr_data, get_position='[lon, lat]', get_radius=3, radius_units='pixels', get_color=[0,0,0,150]))
-                    st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.data_utils.compute_view(hr_data[['lon', 'lat']]), layers=layers))
+                    st.pydeck_chart(pdk.Deck(
+                        map_style=map_style_url, 
+                        api_keys={'mapbox': MAPBOX_KEY},
+                        initial_view_state=pdk.data_utils.compute_view(hr_data[['lon', 'lat']]),
+                        layers=layers
+                    ), key=f"hr_map_{map_style_name}")
                 else:
                     st.warning("Not enough points.")
 
@@ -454,14 +480,21 @@ else:
                     clusters['color'] = clusters['cluster'].apply(get_cluster_rgb)
                     stats = clusters.groupby('cluster').agg(Start=('timestamp', 'min'), End=('timestamp', 'max'), Points=('timestamp', 'count'), Lat=('lat', 'mean'), Lon=('lon', 'mean')).reset_index()
                     stats['Duration (hrs)'] = ((stats['End'] - stats['Start']).dt.total_seconds() / 3600).round(2)
-                    
                     clf = load_model()
                     if clf: stats['Label'] = clf.predict(stats[['Duration (hrs)', 'Points']])
                     else: stats['Label'] = "Unclassified"
                     
-                    layers = [get_tile_layer(map_style)]
+                    layers = []
                     layers.append(pdk.Layer("ScatterplotLayer", data=clusters, get_position='[lon, lat]', get_radius=5, radius_units='pixels', get_fill_color='color', pickable=True))
-                    st.pydeck_chart(pdk.Deck(map_style=None, initial_view_state=pdk.data_utils.compute_view(clusters[['lon', 'lat']]), layers=layers, tooltip={"text": "Cluster: {cluster}"}))
+                    
+                    st.pydeck_chart(pdk.Deck(
+                        map_style=map_style_url,
+                        api_keys={'mapbox': MAPBOX_KEY},
+                        initial_view_state=pdk.data_utils.compute_view(clusters[['lon', 'lat']]),
+                        layers=layers,
+                        tooltip={"text": "Cluster: {cluster}"}
+                    ), key=f"cluster_map_{map_style_name}")
+                    
                     kml_str = generate_kml(clusters.merge(stats[['cluster', 'Duration (hrs)']], on='cluster'), cluster_col='cluster')
                     st.download_button("📥 Download KML", kml_str, "clusters.kml", "application/vnd.google-earth.kml+xml")
                     edited_df = st.data_editor(stats[['cluster', 'Duration (hrs)', 'Points', 'Label']], column_config={"Label": st.column_config.SelectboxColumn(options=["Unclassified", "Kill", "Resting", "Natal", "Other"], required=True)}, use_container_width=True)
@@ -474,14 +507,14 @@ else:
 
         # 7. EXPLORATION
         with tab7:
-            c1, c2, c3 = st.columns([2, 1, 1])
+            c1, c2 = st.columns([2, 1])
             anim_speed = c1.slider("Animation Speed", 0.01, 1.0, 0.1)
             num_steps = c2.number_input("Steps", min_value=1, value=50)
             start_anim = st.checkbox("▶️ Play Animation")
             
             if start_anim:
                 st.markdown("""<style>.main {width: 100% !important; max-width: 100% !important; padding: 0rem !important;} header {display: none !important;} section[data-testid="stSidebar"] {display: none !important;} .stDeckGlJsonChart {height: 90vh !important;}</style>""", unsafe_allow_html=True)
-
+            
             full_data = st.session_state.data
             full_data['individual_id'] = full_data[id_col].astype(str)
             exp_data = full_data[full_data['individual_id'].isin(selected_ids)].copy().sort_values(['individual_id', 'timestamp'])
@@ -490,7 +523,7 @@ else:
                 map_placeholder = st.empty()
                 step_range = range(1, num_steps + 1, 5) if start_anim else [num_steps]
                 for current_step in step_range:
-                    layers = [get_tile_layer(map_style)]
+                    layers = []
                     all_coords = []
                     for ind in selected_ids:
                         ind_steps = exp_data[exp_data['individual_id'] == ind].head(current_step + 1).reset_index(drop=True)
@@ -498,12 +531,11 @@ else:
                         raw_points = ind_steps[['lon', 'lat']].values.tolist()
                         color = get_random_color(ind)
                         
-                        # 1. Path Split
+                        # 1. Path
                         curr_time = ind_steps.iloc[-1]['timestamp']
                         cutoff = curr_time - timedelta(days=1)
                         mask_recent = ind_steps['timestamp'] >= cutoff
                         
-                        # Faint (History)
                         faint_df = ind_steps[~mask_recent]
                         if not faint_df.empty and mask_recent.any():
                             faint_df = pd.concat([faint_df, ind_steps[mask_recent].iloc[[0]]])
@@ -511,26 +543,41 @@ else:
                              faint_pts = faint_df[['lon', 'lat']].values.tolist()
                              layers.append(pdk.Layer("PathLayer", data=[{"path": faint_pts, "name": ind}], get_color=[*color[:3], 60], width_scale=20, width_min_pixels=2, get_path="path", pickable=True))
 
-                        # Solid (Recent)
                         recent_df = ind_steps[mask_recent]
                         if not recent_df.empty:
                              recent_pts = recent_df[['lon', 'lat']].values.tolist()
                              layers.append(pdk.Layer("PathLayer", data=[{"path": recent_pts, "name": ind}], get_color=[*color[:3], 255], width_scale=20, width_min_pixels=3, get_path="path", pickable=True))
                         
-                        # Release Marker (Start) - Red Square using Text Layer
-                        start_row = ind_steps.iloc[[0]].copy()
-                        start_row['marker'] = '■'
-                        layers.append(pdk.Layer("TextLayer", data=start_row, get_position='[lon, lat]', get_text='marker', get_color=[255, 0, 0, 255], get_size=20, get_alignment_baseline="'center'", get_text_anchor="'middle'"))
+                        # 2. Release (Start) - Black Circle, 5px, Yellow Border
+                        layers.append(pdk.Layer(
+                            "ScatterplotLayer", 
+                            data=ind_steps.iloc[[0]], 
+                            get_position='[lon, lat]', 
+                            get_fill_color=[0, 0, 0, 255], 
+                            get_line_color=[255, 255, 0, 255], 
+                            get_line_width=20, 
+                            get_radius=5, radius_units='pixels', 
+                            stroked=True
+                        ))
                         
-                        # Head (Moving)
-                        layers.append(pdk.Layer("ScatterplotLayer", data=ind_steps.iloc[[-1]], get_position='[lon, lat]', get_fill_color=[*color[:3], 255], get_line_color=[255,255,255,255], get_line_width=2, get_radius=4, radius_units='pixels', stroked=True))
+                        # 3. Head (Moving) - 4px
+                        layers.append(pdk.Layer(
+                            "ScatterplotLayer", data=ind_steps.iloc[[-1]], get_position='[lon, lat]', 
+                            get_fill_color=[*color[:3], 255], get_line_color=[255,255,255,255], get_line_width=2, get_radius=4, radius_units='pixels', stroked=True
+                        ))
                         
                         all_coords.extend(raw_points)
                     if all_coords:
                         df_bounds = pd.DataFrame(all_coords, columns=['lon', 'lat'])
                         view_state = pdk.data_utils.compute_view(df_bounds[['lon', 'lat']], view_type=pdk.ViewState)
                         view_state.zoom = view_state.zoom - 0.5
-                        deck = pdk.Deck(map_style=None, initial_view_state=view_state, layers=layers, tooltip={"text": "{name}"})
+                        deck = pdk.Deck(
+                            map_style=map_style_url, 
+                            api_keys={'mapbox': MAPBOX_KEY},
+                            initial_view_state=view_state,
+                            layers=layers,
+                            tooltip={"text": "{name}"}
+                        )
                         map_placeholder.pydeck_chart(deck)
                         if start_anim: time.sleep(anim_speed)
         
@@ -542,8 +589,8 @@ else:
             2.  Click **Fetch Data**.
             **Features**
             * **Dashboard**: Active animals status. Share via WhatsApp.
-            * **Map**: Start (Red Square) / End (Green Square).
-            * **Home Range**: MCP/KDE/Occurrence.
+            * **Map**: Start (Black) / End (Green) markers.
+            * **Home Range**: MCP/KDE.
             * **Kill Clusters**: ID sites, KML download.
-            * **Exploration**: Animation & MP4 download.
+            * **Exploration**: Animation.
             """)
