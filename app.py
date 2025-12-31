@@ -123,28 +123,63 @@ def calculate_mcp(df):
     except: return 0, []
 
 def calculate_kde_95(df, grid_size=100, bw_adjust=1.0):
+    """
+    Calculates the 95% KDE area using a data-driven approach and local projection.
+    """
+    if len(df) < 5:
+        return 0
+        
+    # 1. Improved Coordinate System: Local Projection to Meters
+    # We use the mean latitude to scale longitude for better accuracy in area calculation.
     mean_lat = df['lat'].mean()
     mean_lon = df['lon'].mean()
-    x = (df['lon'] - mean_lon) * 111320 * np.cos(np.radians(mean_lat))
-    y = (df['lat'] - mean_lat) * 111320
+    
+    # Projection constants
+    lat_to_m = 111320
+    lon_to_m = 111320 * np.cos(np.radians(mean_lat))
+    
+    x = (df['lon'] - mean_lon) * lon_to_m
+    y = (df['lat'] - mean_lat) * lat_to_m
     values = np.vstack([x, y])
+    
     try:
+        # 2. Data-Driven Bandwidth
+        # gaussian_kde uses 'scott' or 'silverman' rules by default.
+        # We allow the user to scale this data-driven base using bw_adjust.
         kernel = gaussian_kde(values)
+        
+        # Apply the adjustment factor to the auto-calculated bandwidth
         kernel.set_bandwidth(bw_method=kernel.factor * bw_adjust)
-    except: return 0
-    pad_x = (x.max() - x.min()) * 0.2
-    pad_y = (y.max() - y.min()) * 0.2
+    except Exception:
+        return 0
+
+    # Define grid padding based on data spread
+    pad_x = (x.max() - x.min()) * 0.3
+    pad_y = (y.max() - y.min()) * 0.3
     xmin, xmax = x.min() - pad_x, x.max() + pad_x
     ymin, ymax = y.min() - pad_y, y.max() + pad_y
+
+    # Create evaluation grid
     X, Y = np.mgrid[xmin:xmax:complex(0, grid_size), ymin:ymax:complex(0, grid_size)]
     positions = np.vstack([X.ravel(), Y.ravel()])
+    
+    # Evaluate density across the grid
     Z = np.reshape(kernel(positions).T, X.shape)
+    
+    # 3. Match Contours Properly (95%)
+    # We find the density threshold that encapsulates 95% of the total volume.
     sorted_z = np.sort(Z.ravel())[::-1]
     cumulative = np.cumsum(sorted_z) / np.sum(sorted_z)
+    
+    # Find the index where cumulative density reaches 0.95
     idx = np.searchsorted(cumulative, 0.95)
     threshold = sorted_z[idx]
-    pixel_area = ((xmax - xmin) / grid_size) * ((ymax - ymin) / grid_size)
-    area_m2 = np.sum(Z > threshold) * pixel_area
+    
+    # Calculate area of one pixel in the grid
+    pixel_area = ((xmax - xmin) / (grid_size - 1)) * ((ymax - ymin) / (grid_size - 1))
+    
+    # Sum pixels above the 95% threshold and convert m² to km²
+    area_m2 = np.sum(Z >= threshold) * pixel_area
     return area_m2 / 1e6
 
 # --- ML Functions ---
